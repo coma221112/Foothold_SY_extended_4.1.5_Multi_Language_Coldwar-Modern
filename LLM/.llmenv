@@ -1,0 +1,50 @@
+# Foothold LLM native bridge config
+# This DLL uses OpenAI-compatible chat completions.
+# If LLM_BASE_URL ends at /v1 or /openai, the DLL appends /chat/completions automatically.
+# If a provider needs an exact URL, set LLM_CHAT_COMPLETIONS_URL instead.
+
+# Gemini OpenAI-compatible:
+LLM_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
+LLM_API_KEY=
+LLM_MODEL=gemini-3.1-flash-lite
+
+# DeepSeek:
+# LLM_BASE_URL=https://api.deepseek.com
+# LLM_API_KEY=your-deepseek-api-key
+# LLM_MODEL=deepseek-chat
+
+# Local OpenAI-compatible server, such as vLLM, llama.cpp server, or LM Studio:
+#LLM_BASE_URL=http://127.0.0.1:8080/v1
+#LLM_API_KEY=dummy
+#LLM_MODEL=local-model
+
+LLM_TIMEOUT_MS=60000
+LLM_RETRIES=2
+LLM_MAX_TOKENS=9999
+LLM_TEMPERATURE=1
+
+# Unified reasoning control.
+# Local 127.0.0.1/localhost endpoints are mapped to chat_template_kwargs.enable_thinking automatically.
+# Non-local OpenAI-style endpoints use reasoning_effort when reasoning is enabled.
+LLM_REASONING_ENABLED=true
+LLM_REASONING_EFFORT=high
+LLM_DEBUG_IO=true
+
+# Advanced provider-specific override, normally leave empty.
+LLM_EXTRA_BODY_JSON=
+
+LLM_SYSTEM_PROMPT="你是 DCS 游戏的动态战役任务 Foothold 战场无线电频道编排器。你的任务不是分析战场，也不是补全军事细节，而是根据输入 JSON ，来生成不同的战场单位会说的10条中文无线电碎片，用于未来轮播。  输出必须是严格 JSON 数组，不要 Markdown，不要解释。每项只包含 speaker、priority、text。priority 只能是 high、normal、flavor。 不要从任务类型、ground 强度、zone tags 或无线电口吻中推导出未明示的执行细节、战果、传感器信息、环境信息、单位动作、后勤动作或敌我意图。mission 只表示任务存在，不表示已有飞机、车队、JTAC、地面小队正在执行，也不表示发现目标、完成标记、已出发、正在交火或将产生战果。 红方 inferred 情报必须用“疑似、可能、迹象、监测到”这类不确定措辞。每条 4 到 8 个短句，最多约 190 个中文字符。语气尽量保持幽默随意，记住，你是以职业士兵的语气发无线电，甚至可以说脏话，但是不同职位的角色应该有不同的语气、素质、遣词用句。"
+# Mission exporter settings read by l10n\DEFAULT\Foothold_LLM_Export.lua
+FOOTHOLD_LLM_ENABLED=true
+FOOTHOLD_LLM_TICK_INTERVAL=10
+FOOTHOLD_LLM_SUBMIT_INTERVAL=180
+FOOTHOLD_LLM_BROADCAST_DURATION=18
+FOOTHOLD_LLM_BROADCAST_COALITION=blue
+FOOTHOLD_LLM_MAX_JSON_BYTES=90000
+FOOTHOLD_LLM_MAX_REPLY_CHARS=2400
+FOOTHOLD_LLM_MAX_ZONES=120
+FOOTHOLD_LLM_RADIO_MIN_INTERVAL=9
+FOOTHOLD_LLM_RADIO_MAX_INTERVAL=27
+FOOTHOLD_LLM_DEBUG_FILES=true
+FOOTHOLD_LLM_MAX_MISSIONS=16
+FOOTHOLD_LLM_MAX_AIR_UNITS=24
