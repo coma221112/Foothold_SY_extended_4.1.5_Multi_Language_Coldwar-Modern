@@ -13,6 +13,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <vector>
 
 #pragma comment(lib, "winhttp.lib")
 
@@ -29,6 +30,7 @@ using lua_pushboolean_t = void (__cdecl*)(lua_State*, int);
 using lua_pushcclosure_t = void (__cdecl*)(lua_State*, lua_CFunction, int);
 using lua_pushlstring_t = void (__cdecl*)(lua_State*, const char*, size_t);
 using lua_pushnil_t = void (__cdecl*)(lua_State*);
+using lua_pushnumber_t = void (__cdecl*)(lua_State*, double);
 using lua_pushstring_t = void (__cdecl*)(lua_State*, const char*);
 using lua_setfield_t = void (__cdecl*)(lua_State*, int, const char*);
 
@@ -38,6 +40,7 @@ static lua_pushboolean_t lua_pushboolean = nullptr;
 static lua_pushcclosure_t lua_pushcclosure = nullptr;
 static lua_pushlstring_t lua_pushlstring = nullptr;
 static lua_pushnil_t lua_pushnil = nullptr;
+static lua_pushnumber_t lua_pushnumber = nullptr;
 static lua_pushstring_t lua_pushstring = nullptr;
 static lua_setfield_t lua_setfield = nullptr;
 
@@ -56,11 +59,12 @@ static bool init() {
     lua_pushcclosure = reinterpret_cast<lua_pushcclosure_t>(resolve(mod, "lua_pushcclosure"));
     lua_pushlstring = reinterpret_cast<lua_pushlstring_t>(resolve(mod, "lua_pushlstring"));
     lua_pushnil = reinterpret_cast<lua_pushnil_t>(resolve(mod, "lua_pushnil"));
+    lua_pushnumber = reinterpret_cast<lua_pushnumber_t>(resolve(mod, "lua_pushnumber"));
     lua_pushstring = reinterpret_cast<lua_pushstring_t>(resolve(mod, "lua_pushstring"));
     lua_setfield = reinterpret_cast<lua_setfield_t>(resolve(mod, "lua_setfield"));
 
     return luaL_checklstring && lua_createtable && lua_pushboolean && lua_pushcclosure &&
-        lua_pushlstring && lua_pushnil && lua_pushstring && lua_setfield;
+        lua_pushlstring && lua_pushnil && lua_pushnumber && lua_pushstring && lua_setfield;
 }
 }
 
@@ -151,10 +155,15 @@ std::string read_text_file(const std::string& path) {
     return trim_copy(ss.str());
 }
 
+std::string configured_work_dir();
+std::string work_file_path(const char* filename, const char* fallback);
+
 std::string default_log_path() {
-    std::string dir = dirname(module_path());
-    if (!dir.empty()) return dir + "\\native.log";
-    return "FootholdLLM_native.log";
+    return work_file_path("native.log", "FootholdLLM_native.log");
+}
+
+std::string default_io_log_path() {
+    return work_file_path("inputoutput.log", "FootholdLLM_inputoutput.log");
 }
 
 std::string default_env_path() {
@@ -201,6 +210,44 @@ std::string config_string(const char* name, const char* fallback = "") {
     return fallback;
 }
 
+std::string config_string_compat(const char* name, const char* legacy_name, const char* fallback = "") {
+    std::string value = env_file_get(name);
+    if (!value.empty()) return value;
+    if (legacy_name) {
+        value = env_file_get(legacy_name);
+        if (!value.empty()) return value;
+    }
+    return fallback;
+}
+
+std::string configured_work_dir() {
+    std::string dir = env_file_get("LLM_LOG_DIR");
+    if (dir.empty()) dir = env_file_get("LLM_WORK_DIR");
+    if (dir.empty()) dir = env_file_get("FOOTHOLD_LLM_WORK_DIR");
+    if (dir.empty()) dir = dirname(module_path());
+    while (!dir.empty() && (dir.back() == '\\' || dir.back() == '/')) dir.pop_back();
+    return dir;
+}
+
+std::string work_file_path(const char* filename, const char* fallback) {
+    std::string dir = configured_work_dir();
+    if (!dir.empty()) return dir + "\\" + filename;
+    return fallback;
+}
+
+int config_int_compat(const char* name, const char* legacy_name, int fallback) {
+    std::string value = config_string_compat(name, legacy_name, "");
+    if (value.empty()) return fallback;
+    return std::atoi(value.c_str());
+}
+
+bool config_bool(const char* name, bool fallback = false) {
+    std::string value = env_file_get(name);
+    if (value.empty()) return fallback;
+    for (char& c : value) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    return value == "1" || value == "true" || value == "yes" || value == "on";
+}
+
 void ensure_parent_dir(const std::string& path) {
     size_t pos = path.find_last_of("\\/");
     if (pos == std::string::npos) return;
@@ -225,11 +272,30 @@ void bridge_log(const std::string& message) {
     out << timestamp() << " DLL " << message << "\r\n";
 }
 
+void debug_io_log(uint64_t request_id, const std::string& label, const std::string& text) {
+    if (!config_bool("LLM_DEBUG_IO", false)) return;
+
+    std::string path = default_io_log_path();
+    ensure_parent_dir(path);
+    std::lock_guard<std::mutex> lock(g_log_mutex);
+    std::ofstream out(path, std::ios::app | std::ios::binary);
+    if (!out) return;
+
+    out << "===== " << timestamp() << " request_id=" << request_id << " " << label
+        << " bytes=" << text.size() << " =====\r\n";
+    out << text << "\r\n";
+    out << "===== end " << label << " request_id=" << request_id << " =====\r\n";
+}
+
 std::string get_api_key() {
-    std::string key = env_file_get("GEMINI_API_KEY");
+    std::string key = env_file_get("LLM_API_KEY");
     if (!key.empty()) return key;
 
-    std::string key_file = env_file_get("FOOTHOLD_LLM_API_KEY_FILE");
+    key = env_file_get("GEMINI_API_KEY");
+    if (!key.empty()) return key;
+
+    std::string key_file = env_file_get("LLM_API_KEY_FILE");
+    if (key_file.empty()) key_file = env_file_get("FOOTHOLD_LLM_API_KEY_FILE");
     if (!key_file.empty()) {
         key = read_text_file(key_file);
         if (!key.empty()) return key;
@@ -285,6 +351,82 @@ std::string json_string(const std::string& s) {
     return "\"" + json_escape(s) + "\"";
 }
 
+bool ends_with(const std::string& s, const std::string& suffix) {
+    return s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+std::string trim_slashes_right(std::string s) {
+    while (!s.empty() && s.back() == '/') s.pop_back();
+    return s;
+}
+
+std::string strip_json_object_braces(std::string s) {
+    s = trim_copy(s);
+    if (s.size() >= 2 && s.front() == '{' && s.back() == '}') {
+        s = trim_copy(s.substr(1, s.size() - 2));
+    }
+    return s;
+}
+
+struct ParsedUrl {
+    bool valid = false;
+    bool secure = true;
+    std::string host;
+    INTERNET_PORT port = INTERNET_DEFAULT_HTTPS_PORT;
+    std::string path;
+};
+
+ParsedUrl parse_url(const std::string& raw_url) {
+    ParsedUrl out;
+    std::string url = trim_copy(raw_url);
+    size_t scheme_end = url.find("://");
+    if (scheme_end == std::string::npos) return out;
+
+    std::string scheme = url.substr(0, scheme_end);
+    out.secure = scheme == "https";
+    if (!out.secure && scheme != "http") return out;
+
+    size_t authority_start = scheme_end + 3;
+    size_t path_start = url.find('/', authority_start);
+    std::string authority = path_start == std::string::npos
+        ? url.substr(authority_start)
+        : url.substr(authority_start, path_start - authority_start);
+    out.path = path_start == std::string::npos ? "/" : url.substr(path_start);
+    if (out.path.empty()) out.path = "/";
+
+    size_t colon = authority.rfind(':');
+    if (colon != std::string::npos) {
+        out.host = authority.substr(0, colon);
+        int port = std::atoi(authority.substr(colon + 1).c_str());
+        out.port = port > 0 ? static_cast<INTERNET_PORT>(port) : (out.secure ? INTERNET_DEFAULT_HTTPS_PORT : INTERNET_DEFAULT_HTTP_PORT);
+    } else {
+        out.host = authority;
+        out.port = out.secure ? INTERNET_DEFAULT_HTTPS_PORT : INTERNET_DEFAULT_HTTP_PORT;
+    }
+
+    out.valid = !out.host.empty();
+    return out;
+}
+
+std::string chat_completions_url() {
+    std::string base = config_string("LLM_CHAT_COMPLETIONS_URL", "");
+    if (!base.empty()) return base;
+
+    base = config_string("LLM_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai");
+    base = trim_slashes_right(base);
+    if (ends_with(base, "/chat/completions")) return base;
+    return base + "/chat/completions";
+}
+
+bool is_local_llm_url() {
+    std::string url = config_string("LLM_CHAT_COMPLETIONS_URL", "");
+    if (url.empty()) url = config_string("LLM_BASE_URL", "");
+    for (char& c : url) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    return url.find("127.0.0.1") != std::string::npos ||
+        url.find("localhost") != std::string::npos ||
+        url.find("::1") != std::string::npos;
+}
+
 std::string json_unescape(const std::string& s) {
     std::string out;
     out.reserve(s.size());
@@ -328,28 +470,47 @@ std::string json_unescape(const std::string& s) {
     return out;
 }
 
-std::string build_gemini_body(const std::string& payload) {
-    std::string system = config_string(
+std::string build_chat_body(const std::string& payload) {
+    std::string model = config_string_compat("LLM_MODEL", "FOOTHOLD_LLM_MODEL", "gemini-3.1-flash-lite");
+    std::string system = config_string_compat(
+        "LLM_SYSTEM_PROMPT",
         "FOOTHOLD_LLM_SYSTEM_PROMPT",
         "You are a concise DCS battlefield radio controller for a Foothold mission. "
         "Write one immersive tactical broadcast in English. Use only the supplied JSON state. "
         "Do not invent exact enemy positions. Keep it under 90 words. No markdown. No JSON. No preamble."
     );
     std::string prompt = "Foothold mission state JSON:\n" + payload;
+    std::string max_tokens = config_string("LLM_MAX_TOKENS", "220");
+    std::string temperature = config_string("LLM_TEMPERATURE", "0.55");
+    std::string reasoning_effort = config_string("LLM_REASONING_EFFORT", "");
+    bool reasoning_enabled = config_bool("LLM_REASONING_ENABLED", false);
+    std::string extra_body = strip_json_object_braces(config_string("LLM_EXTRA_BODY_JSON", ""));
 
     std::ostringstream os;
     os << "{"
-       << "\"systemInstruction\":{\"parts\":[{\"text\":" << json_string(system) << "}]},"
-       << "\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":" << json_string(prompt) << "}]}],"
-       << "\"generationConfig\":{\"temperature\":0.55,\"maxOutputTokens\":220}"
-       << "}";
+       << "\"model\":" << json_string(model) << ","
+       << "\"messages\":["
+       << "{\"role\":\"system\",\"content\":" << json_string(system) << "},"
+       << "{\"role\":\"user\",\"content\":" << json_string(prompt) << "}"
+       << "],"
+       << "\"temperature\":" << temperature << ","
+       << "\"max_tokens\":" << max_tokens;
+
+    if (is_local_llm_url()) {
+        os << ",\"chat_template_kwargs\":{\"enable_thinking\":" << (reasoning_enabled ? "true" : "false") << "}";
+    } else if (reasoning_enabled && !reasoning_effort.empty()) {
+        os << ",\"reasoning_effort\":" << json_string(reasoning_effort);
+    }
+
+    if (!extra_body.empty()) os << "," << extra_body;
+    os << "}";
     return os.str();
 }
 
 std::string extract_text(const std::string& body) {
-    size_t key = body.find("\"text\"");
+    size_t key = body.find("\"content\"");
     while (key != std::string::npos) {
-        size_t colon = body.find(':', key + 6);
+        size_t colon = body.find(':', key + 9);
         if (colon == std::string::npos) break;
         size_t quote = body.find('"', colon + 1);
         if (quote == std::string::npos) break;
@@ -369,7 +530,7 @@ std::string extract_text(const std::string& body) {
                 raw.push_back(c);
             }
         }
-        key = body.find("\"text\"", key + 6);
+        key = body.find("\"content\"", key + 9);
     }
     return "";
 }
@@ -381,24 +542,21 @@ std::string winhttp_error(const char* prefix) {
     return os.str();
 }
 
-Result request_gemini_once(const Request& req) {
+Result request_chat_once(const Request& req) {
     Result result;
     result.id = req.id;
     bridge_log("request start id=" + std::to_string(req.id) + " payload_len=" + std::to_string(req.payload.size()));
 
     std::string api_key = get_api_key();
-    if (api_key.empty()) {
-        result.error = "GEMINI_API_KEY is empty";
+    std::string url = chat_completions_url();
+    ParsedUrl parsed = parse_url(url);
+    if (!parsed.valid) {
+        result.error = "invalid LLM_BASE_URL/LLM_CHAT_COMPLETIONS_URL: " + url;
         bridge_log("request error id=" + std::to_string(req.id) + " " + result.error);
         return result;
     }
-
-    std::string model = config_string("FOOTHOLD_LLM_MODEL", "gemini-2.0-flash");
-    if (model.rfind("models/", 0) != 0) {
-        model = "models/" + model;
-    }
-    std::string path = "/v1beta/" + model + ":generateContent?key=" + api_key;
-    std::string body = build_gemini_body(req.payload);
+    std::string body = build_chat_body(req.payload);
+    debug_io_log(req.id, "request", body);
 
     HINTERNET session = WinHttpOpen(L"Foothold llmbridge/0.1",
         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
@@ -408,12 +566,13 @@ Result request_gemini_once(const Request& req) {
         return result;
     }
 
-    int timeout_i = std::atoi(config_string("FOOTHOLD_LLM_HTTP_TIMEOUT_MS", "12000").c_str());
+    int timeout_i = config_int_compat("LLM_TIMEOUT_MS", "FOOTHOLD_LLM_HTTP_TIMEOUT_MS", 12000);
     if (timeout_i < 1000) timeout_i = 1000;
     DWORD timeout_ms = static_cast<DWORD>(timeout_i);
     WinHttpSetTimeouts(session, timeout_ms, timeout_ms, timeout_ms, timeout_ms);
 
-    HINTERNET connect = WinHttpConnect(session, L"generativelanguage.googleapis.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
+    std::wstring whost = utf8_to_wide(parsed.host);
+    HINTERNET connect = WinHttpConnect(session, whost.c_str(), parsed.port, 0);
     if (!connect) {
         result.error = winhttp_error("WinHttpConnect");
         bridge_log("request error id=" + std::to_string(req.id) + " " + result.error);
@@ -421,9 +580,9 @@ Result request_gemini_once(const Request& req) {
         return result;
     }
 
-    std::wstring wpath = utf8_to_wide(path);
+    std::wstring wpath = utf8_to_wide(parsed.path);
     HINTERNET request = WinHttpOpenRequest(connect, L"POST", wpath.c_str(), nullptr,
-        WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+        WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, parsed.secure ? WINHTTP_FLAG_SECURE : 0);
     if (!request) {
         result.error = winhttp_error("WinHttpOpenRequest");
         bridge_log("request error id=" + std::to_string(req.id) + " " + result.error);
@@ -432,8 +591,13 @@ Result request_gemini_once(const Request& req) {
         return result;
     }
 
-    const wchar_t* headers = L"Content-Type: application/json\r\n";
-    BOOL sent = WinHttpSendRequest(request, headers, static_cast<DWORD>(-1L),
+    std::wstring header_string = L"Content-Type: application/json\r\n";
+    if (!api_key.empty()) {
+        header_string += L"Authorization: Bearer ";
+        header_string += utf8_to_wide(api_key);
+        header_string += L"\r\n";
+    }
+    BOOL sent = WinHttpSendRequest(request, header_string.c_str(), static_cast<DWORD>(-1L),
         const_cast<char*>(body.data()), static_cast<DWORD>(body.size()), static_cast<DWORD>(body.size()), 0);
     if (!sent || !WinHttpReceiveResponse(request, nullptr)) {
         result.error = winhttp_error("WinHttpSendRequest/ReceiveResponse");
@@ -464,6 +628,7 @@ Result request_gemini_once(const Request& req) {
     WinHttpCloseHandle(request);
     WinHttpCloseHandle(connect);
     WinHttpCloseHandle(session);
+    debug_io_log(req.id, "response http_status=" + std::to_string(status), response);
 
     if (status < 200 || status >= 300) {
         std::ostringstream os;
@@ -475,7 +640,7 @@ Result request_gemini_once(const Request& req) {
 
     result.text = extract_text(response);
     if (result.text.empty()) {
-        result.error = "Gemini response did not contain text";
+        result.error = "chat completion response did not contain choices[].message.content";
         bridge_log("request error id=" + std::to_string(req.id) + " " + result.error + " response_len=" + std::to_string(response.size()));
         return result;
     }
@@ -485,13 +650,13 @@ Result request_gemini_once(const Request& req) {
     return result;
 }
 
-Result request_gemini(const Request& req) {
-    int retries = std::atoi(config_string("FOOTHOLD_LLM_RETRIES", "2").c_str());
+Result request_chat(const Request& req) {
+    int retries = config_int_compat("LLM_RETRIES", "FOOTHOLD_LLM_RETRIES", 2);
     if (retries < 0) retries = 0;
     Result last;
     for (int attempt = 0; attempt <= retries; ++attempt) {
         bridge_log("request attempt id=" + std::to_string(req.id) + " attempt=" + std::to_string(attempt + 1) + " retries=" + std::to_string(retries));
-        last = request_gemini_once(req);
+        last = request_chat_once(req);
         if (last.ok) return last;
         if (attempt < retries) Sleep(static_cast<DWORD>(250 * (attempt + 1)));
     }
@@ -512,7 +677,7 @@ void worker_loop() {
             bridge_log("worker dequeued id=" + std::to_string(req.id));
         }
 
-        Result result = request_gemini(req);
+        Result result = request_chat(req);
 
         {
             std::lock_guard<std::mutex> lock(g_mutex);
@@ -588,13 +753,15 @@ int l_submit(lua_State* L) {
     Request req;
     req.id = g_next_id++;
     req.payload.assign(payload, len);
+    uint64_t request_id = req.id;
     g_queue.push(std::move(req));
     g_state = State::Busy;
     g_cv.notify_one();
-    bridge_log("submit accepted id=" + std::to_string(g_next_id - 1) + " payload_len=" + std::to_string(len));
+    bridge_log("submit accepted id=" + std::to_string(request_id) + " payload_len=" + std::to_string(len));
 
     lua::lua_pushboolean(L, 1);
-    return 1;
+    lua::lua_pushnumber(L, static_cast<double>(request_id));
+    return 2;
 }
 
 int l_poll(lua_State* L) {
